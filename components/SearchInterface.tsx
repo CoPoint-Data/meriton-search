@@ -118,7 +118,7 @@ function PieChart({ chart }: { chart: Chart }) {
 
               acc.offset += percentage;
               return acc;
-            }, { circles: [] as JSX.Element[], offset: 0 }).circles}
+            }, { circles: [] as React.ReactElement[], offset: 0 }).circles}
           </svg>
         </div>
       </div>
