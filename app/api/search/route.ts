@@ -1,11 +1,25 @@
+// Force Node.js runtime - Pinecone SDK is not compatible with Edge runtime
+export const runtime = 'nodejs';
+
 import { NextRequest, NextResponse } from 'next/server';
-import { getPineconeClient, getIndexName } from '@/lib/pinecone';
+import { getIndexName, withPineconeErrorHandling, PineconeError } from '@/lib/pinecone';
 import { retryOperation, validateMetadataFilter } from '@/lib/pinecone-retry';
 import { measureOperation } from '@/lib/pinecone-logger';
 import { SearchResponse, SearchResult, ROLE_HIERARCHY } from '@/lib/types';
 import { validateSession, roleToString } from '@/lib/auth';
 import { Role } from '@prisma/client';
 import OpenAI from 'openai';
+
+// Dynamic import for Pinecone to avoid bundling issues on Vercel
+async function getPineconeIndex(indexName: string) {
+  const { Pinecone } = await import('@pinecone-database/pinecone');
+  const apiKey = process.env.PINECONE_API_KEY;
+  if (!apiKey) {
+    throw new Error('PINECONE_API_KEY environment variable is not set');
+  }
+  const pc = new Pinecone({ apiKey: apiKey.trim() });
+  return pc.Index(indexName);
+}
 
 // Lazy-load OpenAI client
 function getOpenAI() {
@@ -656,8 +670,9 @@ async function executeToolCall(
   userMaxResults?: number
 ): Promise<any> {
   const openai = getOpenAI();
-  const pc = getPineconeClient();
-  const index = pc.Index(getIndexName());
+  const indexName = getIndexName();
+  // Use dynamic import for Pinecone (matches debug endpoint that works)
+  const index = await getPineconeIndex(indexName);
 
   // Use original user query as fallback if LLM didn't provide one
   // This handles cases where OpenAI function calling fails to populate the query parameter
@@ -768,28 +783,38 @@ async function executeToolCall(
     }
   }
 
-  // Query Pinecone with retry logic and monitoring
-  const queryResponse = await measureOperation(
-    () => retryOperation(
-      () => index.query({
-        vector: queryEmbedding,
-        topK: userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10),
-        includeMetadata: true,
-        filter: Object.keys(filter).length > 0 ? filter : undefined,
-      }),
-      {
-        maxRetries: 5,
-        baseDelay: 1000,
-      }
-    ),
-    {
-      operation: 'query',
-      indexName: getIndexName(),
-      topK: args.top_k || 10,
-      filterKeys: Object.keys(filter),
-      userId: userOpCoCode || 'unknown',
-      opCoCode: userOpCoCode || undefined,
-    }
+  // Query Pinecone with retry logic, monitoring, and enhanced error handling
+  console.log('[Search] Querying Pinecone index:', indexName);
+  console.log('[Search] Filter:', JSON.stringify(filter));
+  console.log('[Search] TopK:', userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10));
+
+  const queryResponse = await withPineconeErrorHandling(
+    'query',
+    async () => {
+      return await measureOperation(
+        () => retryOperation(
+          () => index.query({
+            vector: queryEmbedding,
+            topK: userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10),
+            includeMetadata: true,
+            filter: Object.keys(filter).length > 0 ? filter : undefined,
+          }),
+          {
+            maxRetries: 5,
+            baseDelay: 1000,
+          }
+        ),
+        {
+          operation: 'query',
+          indexName: indexName,
+          topK: args.top_k || 10,
+          filterKeys: Object.keys(filter),
+          userId: userOpCoCode || 'unknown',
+          opCoCode: userOpCoCode || undefined,
+        }
+      );
+    },
+    { indexName, toolName, filterKeys: Object.keys(filter) }
   );
 
   // Format results for LLM - include all metadata from Pinecone
@@ -861,9 +886,14 @@ async function executeToolCall(
 }
 
 export async function POST(request: NextRequest) {
+  console.log('Search API called');
+  console.log('Runtime:', process.env.NEXT_RUNTIME);
+  console.log('Is Node.js:', !!process.versions?.node);
+  console.log('Node version:', process.versions?.node);
   try {
     // Validate session
     const token = request.cookies.get('session')?.value;
+    console.log('Session token present:', !!token);
     if (!token) {
       return NextResponse.json(
         { error: 'Not authenticated' },
@@ -871,7 +901,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    console.log('Validating session...');
     const user = await validateSession(token);
+    console.log('Session validated:', user ? 'valid' : 'invalid');
     if (!user) {
       return NextResponse.json(
         { error: 'Invalid or expired session' },
@@ -898,7 +930,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    console.log('Initializing OpenAI...');
     const openai = getOpenAI();
+    console.log('OpenAI initialized, calling API...');
 
     // Initial LLM call with function calling
     const initialResponse = await openai.chat.completions.create({
@@ -1160,19 +1194,52 @@ Do NOT create a detailed markdown list of each individual record. The detailed i
 
     return jsonResponse;
   } catch (error: any) {
-    console.error('Search error:', {
+    // Enhanced error logging
+    const errorInfo: Record<string, any> = {
       message: error?.message,
       status: error?.status,
       name: error?.name,
-      stack: error?.stack,
-    });
+      code: error?.code,
+      cause: error?.cause,
+      stack: error?.stack?.split('\n').slice(0, 5).join('\n'),
+    };
+
+    // If it's a PineconeError, include the detailed info
+    if (error instanceof PineconeError || error?.name === 'PineconeError') {
+      errorInfo.pineconeOperation = error.operation;
+      errorInfo.pineconeDetails = error.details;
+      errorInfo.originalError = error.originalError ? {
+        message: error.originalError.message,
+        name: error.originalError.name,
+        status: error.originalError.status,
+        code: error.originalError.code,
+      } : null;
+    }
+
+    console.error('Search error:', JSON.stringify(errorInfo, null, 2));
 
     // Classify error type for better client-side handling
     let statusCode = 500;
     let errorMessage = 'Internal server error';
 
+    // PineconeError - use the detailed message
+    if (error instanceof PineconeError || error?.name === 'PineconeError') {
+      errorMessage = error.message;
+      // Map to appropriate status code
+      if (error.message.includes('authentication') || error.message.includes('API key')) {
+        statusCode = 401;
+      } else if (error.message.includes('access denied')) {
+        statusCode = 403;
+      } else if (error.message.includes('not found')) {
+        statusCode = 404;
+      } else if (error.message.includes('rate limit')) {
+        statusCode = 429;
+      } else if (error.message.includes('network')) {
+        statusCode = 503;
+      }
+    }
     // Authentication errors
-    if (error?.status === 401 || error?.status === 403) {
+    else if (error?.status === 401 || error?.status === 403) {
       statusCode = 401;
       errorMessage = 'Authentication failed. Please check your API keys.';
     }
@@ -1206,11 +1273,28 @@ Do NOT create a detailed markdown list of each individual record. The detailed i
       statusCode = 400;
       errorMessage = 'Unable to process the request. Please rephrase your question.';
     }
+    // Connection errors - provide more specific feedback
+    else if (error?.message?.includes('Connection error')) {
+      statusCode = 503;
+      errorMessage = `Pinecone connection failed. This may be due to network issues or invalid credentials. Details: ${error?.message}`;
+    }
 
     return NextResponse.json(
       {
         error: errorMessage,
-        details: process.env.NODE_ENV === 'development' ? error?.message : undefined,
+        // Include detailed debug info for troubleshooting
+        debug: {
+          message: error?.message,
+          name: error?.name,
+          code: error?.code,
+          operation: error?.operation,
+          details: error?.details,
+          originalError: error?.originalError ? {
+            message: error.originalError.message,
+            name: error.originalError.name,
+            status: error.originalError.status,
+          } : undefined,
+        },
       },
       { status: statusCode }
     );

@@ -1,35 +1,144 @@
 import { Pinecone, Index } from '@pinecone-database/pinecone';
 
-let pineconeClient: Pinecone | null = null;
-let indexCache: Map<string, Index> = new Map();
+// Note: No singletons - each request creates fresh clients for serverless compatibility
 
 /**
- * Get singleton Pinecone client
- * Reuses connection pool across requests
+ * Enhanced error class for Pinecone operations
  */
-export function getPineconeClient(): Pinecone {
-  if (!pineconeClient) {
-    const apiKey = process.env.PINECONE_API_KEY;
+export class PineconeError extends Error {
+  public readonly originalError: any;
+  public readonly operation: string;
+  public readonly details: Record<string, any>;
 
-    if (!apiKey) {
-      throw new Error('PINECONE_API_KEY environment variable is not set');
-    }
-
-    // Validate API key format
-    if (apiKey.length < 20) {
-      throw new Error('PINECONE_API_KEY appears to be invalid (too short)');
-    }
-
-    pineconeClient = new Pinecone({
-      apiKey,
-      // Note: maxRetries is not supported in this SDK version
-      // Retry logic is implemented via retryOperation wrapper instead
-    });
-
-    console.log('Pinecone client initialized successfully');
+  constructor(message: string, operation: string, originalError?: any, details?: Record<string, any>) {
+    super(message);
+    this.name = 'PineconeError';
+    this.operation = operation;
+    this.originalError = originalError;
+    this.details = details || {};
   }
 
-  return pineconeClient;
+  toJSON() {
+    return {
+      name: this.name,
+      message: this.message,
+      operation: this.operation,
+      details: this.details,
+      originalError: this.originalError ? {
+        message: this.originalError.message,
+        name: this.originalError.name,
+        status: this.originalError.status,
+        statusCode: this.originalError.statusCode,
+        code: this.originalError.code,
+        cause: this.originalError.cause,
+        body: this.originalError.body,
+      } : null,
+    };
+  }
+}
+
+/**
+ * Wrap Pinecone operations with detailed error handling
+ */
+export async function withPineconeErrorHandling<T>(
+  operation: string,
+  fn: () => Promise<T>,
+  context?: Record<string, any>
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    // Extract all possible error details
+    const errorDetails = {
+      ...context,
+      errorMessage: error?.message,
+      errorName: error?.name,
+      errorCode: error?.code,
+      errorStatus: error?.status || error?.statusCode,
+      errorBody: error?.body,
+      errorCause: error?.cause ? JSON.stringify(error.cause) : undefined,
+      errorResponse: error?.response ? {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        headers: error.response.headers,
+      } : undefined,
+    };
+
+    // Create a more descriptive error message
+    let message = `Pinecone ${operation} failed: ${error?.message || 'Unknown error'}`;
+
+    // Add specific context based on error type
+    if (error?.status === 401 || error?.statusCode === 401) {
+      message = `Pinecone authentication failed: Invalid API key. Check PINECONE_API_KEY environment variable.`;
+    } else if (error?.status === 403 || error?.statusCode === 403) {
+      message = `Pinecone access denied: API key may not have access to this index.`;
+    } else if (error?.status === 404 || error?.statusCode === 404) {
+      message = `Pinecone index not found: Check PINECONE_INDEX_NAME environment variable.`;
+    } else if (error?.status === 429 || error?.statusCode === 429) {
+      message = `Pinecone rate limit exceeded: Too many requests.`;
+    } else if (error?.message?.includes('fetch') || error?.message?.includes('network') || error?.message?.includes('Connection')) {
+      message = `Pinecone network error: Unable to connect to Pinecone API. ${error?.message}`;
+    }
+
+    console.error(`[PineconeError] ${operation}:`, JSON.stringify(errorDetails, null, 2));
+
+    throw new PineconeError(message, operation, error, errorDetails);
+  }
+}
+
+/**
+ * Get Pinecone client
+ * Creates a fresh client for each request to avoid stale connection issues in serverless
+ */
+export function getPineconeClient(): Pinecone {
+  const apiKey = process.env.PINECONE_API_KEY;
+
+  if (!apiKey) {
+    throw new PineconeError(
+      'PINECONE_API_KEY environment variable is not set',
+      'initialization',
+      null,
+      { envVarSet: false }
+    );
+  }
+
+  // Validate API key format
+  if (apiKey.length < 20) {
+    throw new PineconeError(
+      `PINECONE_API_KEY appears to be invalid (length: ${apiKey.length}, expected: 70+)`,
+      'initialization',
+      null,
+      { apiKeyLength: apiKey.length }
+    );
+  }
+
+  // Check for common issues
+  const trimmedKey = apiKey.trim();
+
+  if (/[\r\n]/.test(apiKey)) {
+    throw new PineconeError(
+      'PINECONE_API_KEY contains newline characters - this will cause authentication failures',
+      'initialization',
+      null,
+      { hasNewlines: true, apiKeyLength: apiKey.length }
+    );
+  }
+
+  try {
+    // Create fresh client for each request (serverless-friendly)
+    const client = new Pinecone({
+      apiKey: trimmedKey,
+    });
+    console.log('[Pinecone] Client created (fresh instance)');
+    return client;
+  } catch (error: any) {
+    throw new PineconeError(
+      `Failed to create Pinecone client: ${error?.message}`,
+      'initialization',
+      error,
+      { apiKeyLength: apiKey.length }
+    );
+  }
 }
 
 /**
@@ -53,19 +162,13 @@ export function getIndexName(): string {
 }
 
 /**
- * Get cached index instance
- * Reuses index connection for better performance
+ * Get index instance (fresh for each request in serverless)
  */
 export function getIndex(indexName?: string): Index {
   const name = indexName || getIndexName();
-
-  if (!indexCache.has(name)) {
-    const pc = getPineconeClient();
-    indexCache.set(name, pc.Index(name));
-    console.log(`Index connection created: ${name}`);
-  }
-
-  return indexCache.get(name)!;
+  const pc = getPineconeClient();
+  console.log(`[Pinecone] Index reference created: ${name}`);
+  return pc.Index(name);
 }
 
 /**
