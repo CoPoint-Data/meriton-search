@@ -2,6 +2,7 @@
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
+import OpenAI from 'openai';
 
 export async function GET(request: NextRequest) {
   const results: Record<string, any> = {};
@@ -80,14 +81,14 @@ export async function GET(request: NextRequest) {
 
       // Test 3: Query with a random vector (1536 dimensions)
       try {
-        console.log('Testing Pinecone query...');
+        console.log('Testing Pinecone query with random vector...');
         const randomVector = Array.from({ length: 1536 }, () => Math.random() - 0.5);
         const queryResult = await index.query({
           vector: randomVector,
           topK: 3,
           includeMetadata: true,
         });
-        results.sdkQuery = {
+        results.sdkQueryRandom = {
           success: true,
           matchCount: queryResult.matches?.length || 0,
           firstMatch: queryResult.matches?.[0] ? {
@@ -97,11 +98,53 @@ export async function GET(request: NextRequest) {
           } : null,
         };
       } catch (queryError: any) {
-        results.sdkQueryError = {
+        results.sdkQueryRandomError = {
           message: queryError.message,
           name: queryError.name,
           cause: queryError.cause ? JSON.stringify(queryError.cause) : undefined,
           stack: queryError.stack?.split('\n').slice(0, 5).join('\n'),
+        };
+      }
+
+      // Test 4: FULL integration test - OpenAI embedding + Pinecone query (mirrors search route)
+      try {
+        console.log('Testing full integration: OpenAI embedding + Pinecone query...');
+
+        // Step 1: Create OpenAI embedding
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const embeddingResponse = await openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: 'test query for invoices',
+        });
+        const embedding = embeddingResponse.data[0].embedding;
+        console.log('Got embedding, dimensions:', embedding.length);
+
+        // Step 2: Query Pinecone with the real embedding
+        const queryWithEmbedding = await index.query({
+          vector: embedding,
+          topK: 5,
+          includeMetadata: true,
+          filter: {
+            domain: { $eq: 'financial' },
+            record_type: { $eq: 'invoice' },
+          },
+        });
+
+        results.fullIntegration = {
+          success: true,
+          embeddingDimensions: embedding.length,
+          pineconeMatches: queryWithEmbedding.matches?.length || 0,
+          firstMatch: queryWithEmbedding.matches?.[0] ? {
+            id: queryWithEmbedding.matches[0].id,
+            score: queryWithEmbedding.matches[0].score,
+          } : null,
+        };
+      } catch (integrationError: any) {
+        results.fullIntegrationError = {
+          message: integrationError.message,
+          name: integrationError.name,
+          cause: integrationError.cause ? JSON.stringify(integrationError.cause) : undefined,
+          stack: integrationError.stack?.split('\n').slice(0, 5).join('\n'),
         };
       }
     }
