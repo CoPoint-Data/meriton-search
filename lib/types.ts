@@ -6,6 +6,7 @@ export interface TransactionMetadata {
   opco_id: string;
   vendor_id?: string;
   role_required: string;
+  [key: string]: any;  // Allow additional dynamic fields
 }
 
 export interface SearchRequest {
