@@ -1017,11 +1017,14 @@ User: "Tell me about that"
           id: r.id,
           text: r.text || r.summary || r.title || '',
           metadata: {
-            // Common metadata
+            // Required base fields
             date: r.date || '',
             vendor: r.vendor || r.manufacturer || '',
             amount: amount,
+            account: r.account || r.category || '',
             opco_id: r.opco_id || '',
+            role_required: r.role_required || 'employee',
+            // Additional common metadata
             company_name: r.company_name || '',
             region: r.region || '',
             state: r.state || '',
