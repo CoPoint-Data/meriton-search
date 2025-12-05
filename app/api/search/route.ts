@@ -470,6 +470,14 @@ function aggregateVendorEntities(results: any[]): SearchResult[] {
       id: `vendor-${vendorName.toLowerCase().replace(/\s+/g, '-')}`,
       text: `${vendorName}: ${data.invoices.length} invoices, $${data.totalAmount.toFixed(2)} total`,
       metadata: {
+        // Required base fields
+        date: lastDate,
+        vendor: vendorName,
+        amount: data.totalAmount,
+        account: 'aggregated',
+        opco_id: 'all',
+        role_required: 'employee',
+        // Vendor aggregation fields
         entity_type: 'vendor',
         vendor_name: vendorName,
         invoice_count: data.invoices.length,
