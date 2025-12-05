@@ -361,16 +361,16 @@ export default function SearchInterface() {
     if (!results || !results.sources || results.sources.length === 0) return null;
 
     const sources = results.sources;
-    const total = sources.reduce((sum, s) => sum + (s.metadata?.amount || 0), 0);
+    const total = sources.reduce((sum, s) => sum + ((s.metadata as any)?.amount || 0), 0);
     const count = sources.length;
     const avg = total / count;
 
     // Check for payment status
-    const paidCount = sources.filter(s => s.metadata?.payment_status === 'paid').length;
+    const paidCount = sources.filter(s => (s.metadata as any)?.payment_status === 'paid').length;
     const paidRate = count > 0 ? (paidCount / count) * 100 : 0;
 
     // Check for entity aggregation (vendor cards)
-    const isVendorView = sources.some(s => s.metadata?.entity_type === 'vendor');
+    const isVendorView = sources.some(s => (s.metadata as any)?.entity_type === 'vendor');
 
     return {
       total,
