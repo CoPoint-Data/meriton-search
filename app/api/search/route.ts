@@ -669,18 +669,26 @@ async function executeToolCall(
   originalUserQuery: string,
   userMaxResults?: number
 ): Promise<any> {
+  console.log('[executeToolCall] Step 1: Starting...');
+
   const openai = getOpenAI();
+  console.log('[executeToolCall] Step 2: OpenAI client created');
 
   // Create Pinecone client inline (exactly like debug endpoint that works)
+  console.log('[executeToolCall] Step 3: Importing Pinecone...');
   const { Pinecone } = await import('@pinecone-database/pinecone');
+  console.log('[executeToolCall] Step 4: Pinecone imported');
+
   const apiKey = process.env.PINECONE_API_KEY;
   if (!apiKey) {
     throw new Error('PINECONE_API_KEY environment variable is not set');
   }
   const indexName = process.env.PINECONE_INDEX_NAME || 'legacy-search';
+  console.log('[executeToolCall] Step 5: Creating Pinecone client...');
   const pc = new Pinecone({ apiKey: apiKey.trim() });
+  console.log('[executeToolCall] Step 6: Pinecone client created');
   const index = pc.Index(indexName);
-  console.log('[Search] Pinecone client created inline, index:', indexName);
+  console.log('[executeToolCall] Step 7: Index reference created:', indexName);
 
   // Use original user query as fallback if LLM didn't provide one
   // This handles cases where OpenAI function calling fails to populate the query parameter
@@ -698,10 +706,18 @@ async function executeToolCall(
   }
 
   // Generate embedding
-  const embeddingResponse = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: searchQuery,
-  });
+  console.log('[executeToolCall] Step 8: Generating embedding for query:', searchQuery.substring(0, 50));
+  let embeddingResponse;
+  try {
+    embeddingResponse = await openai.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: searchQuery,
+    });
+    console.log('[executeToolCall] Step 9: Embedding generated, dimensions:', embeddingResponse.data[0].embedding.length);
+  } catch (embError: any) {
+    console.error('[executeToolCall] EMBEDDING ERROR:', embError.message);
+    throw embError;
+  }
   const queryEmbedding = embeddingResponse.data[0].embedding;
 
   // Build filter with SERVER-SIDE security enforcement
@@ -792,16 +808,29 @@ async function executeToolCall(
   }
 
   // Query Pinecone - simplified direct call (matches working debug endpoint)
+  console.log('[executeToolCall] Step 10: About to query Pinecone');
   console.log('[Search] Querying Pinecone index:', indexName);
   console.log('[Search] Filter:', JSON.stringify(filter));
   console.log('[Search] TopK:', userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10));
 
-  const queryResponse = await index.query({
-    vector: queryEmbedding,
-    topK: userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10),
-    includeMetadata: true,
-    filter: Object.keys(filter).length > 0 ? filter : undefined,
-  });
+  let queryResponse;
+  try {
+    queryResponse = await index.query({
+      vector: queryEmbedding,
+      topK: userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10),
+      includeMetadata: true,
+      filter: Object.keys(filter).length > 0 ? filter : undefined,
+    });
+    console.log('[executeToolCall] Step 11: Pinecone query successful, matches:', queryResponse.matches?.length);
+  } catch (pcError: any) {
+    console.error('[executeToolCall] PINECONE QUERY ERROR:', pcError.message);
+    console.error('[executeToolCall] PINECONE ERROR DETAILS:', JSON.stringify({
+      name: pcError.name,
+      message: pcError.message,
+      cause: pcError.cause,
+    }));
+    throw pcError;
+  }
 
   // Format results for LLM - include all metadata from Pinecone
   const results = (queryResponse.matches || []).map((match) => {
