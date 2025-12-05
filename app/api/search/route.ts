@@ -670,9 +670,17 @@ async function executeToolCall(
   userMaxResults?: number
 ): Promise<any> {
   const openai = getOpenAI();
-  const indexName = getIndexName();
-  // Use dynamic import for Pinecone (matches debug endpoint that works)
-  const index = await getPineconeIndex(indexName);
+
+  // Create Pinecone client inline (exactly like debug endpoint that works)
+  const { Pinecone } = await import('@pinecone-database/pinecone');
+  const apiKey = process.env.PINECONE_API_KEY;
+  if (!apiKey) {
+    throw new Error('PINECONE_API_KEY environment variable is not set');
+  }
+  const indexName = process.env.PINECONE_INDEX_NAME || 'legacy-search';
+  const pc = new Pinecone({ apiKey: apiKey.trim() });
+  const index = pc.Index(indexName);
+  console.log('[Search] Pinecone client created inline, index:', indexName);
 
   // Use original user query as fallback if LLM didn't provide one
   // This handles cases where OpenAI function calling fails to populate the query parameter
@@ -783,39 +791,17 @@ async function executeToolCall(
     }
   }
 
-  // Query Pinecone with retry logic, monitoring, and enhanced error handling
+  // Query Pinecone - simplified direct call (matches working debug endpoint)
   console.log('[Search] Querying Pinecone index:', indexName);
   console.log('[Search] Filter:', JSON.stringify(filter));
   console.log('[Search] TopK:', userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10));
 
-  const queryResponse = await withPineconeErrorHandling(
-    'query',
-    async () => {
-      return await measureOperation(
-        () => retryOperation(
-          () => index.query({
-            vector: queryEmbedding,
-            topK: userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10),
-            includeMetadata: true,
-            filter: Object.keys(filter).length > 0 ? filter : undefined,
-          }),
-          {
-            maxRetries: 5,
-            baseDelay: 1000,
-          }
-        ),
-        {
-          operation: 'query',
-          indexName: indexName,
-          topK: args.top_k || 10,
-          filterKeys: Object.keys(filter),
-          userId: userOpCoCode || 'unknown',
-          opCoCode: userOpCoCode || undefined,
-        }
-      );
-    },
-    { indexName, toolName, filterKeys: Object.keys(filter) }
-  );
+  const queryResponse = await index.query({
+    vector: queryEmbedding,
+    topK: userMaxResults || args.top_k || (toolName === 'search_all' ? 25 : 10),
+    includeMetadata: true,
+    filter: Object.keys(filter).length > 0 ? filter : undefined,
+  });
 
   // Format results for LLM - include all metadata from Pinecone
   const results = (queryResponse.matches || []).map((match) => {
