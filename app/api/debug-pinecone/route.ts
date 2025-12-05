@@ -77,6 +77,33 @@ export async function GET(request: NextRequest) {
         success: true,
         stats: stats,
       };
+
+      // Test 3: Query with a random vector (1536 dimensions)
+      try {
+        console.log('Testing Pinecone query...');
+        const randomVector = Array.from({ length: 1536 }, () => Math.random() - 0.5);
+        const queryResult = await index.query({
+          vector: randomVector,
+          topK: 3,
+          includeMetadata: true,
+        });
+        results.sdkQuery = {
+          success: true,
+          matchCount: queryResult.matches?.length || 0,
+          firstMatch: queryResult.matches?.[0] ? {
+            id: queryResult.matches[0].id,
+            score: queryResult.matches[0].score,
+            hasMetadata: !!queryResult.matches[0].metadata,
+          } : null,
+        };
+      } catch (queryError: any) {
+        results.sdkQueryError = {
+          message: queryError.message,
+          name: queryError.name,
+          cause: queryError.cause ? JSON.stringify(queryError.cause) : undefined,
+          stack: queryError.stack?.split('\n').slice(0, 5).join('\n'),
+        };
+      }
     }
   } catch (error: any) {
     results.sdkError = {
