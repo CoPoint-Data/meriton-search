@@ -106,7 +106,7 @@ export async function GET(request: NextRequest) {
         };
       }
 
-      // Test 4: FULL integration test - OpenAI embedding + Pinecone query (mirrors search route)
+      // Test 4: OpenAI embedding + Pinecone query (WITH filter - mirrors search route)
       try {
         console.log('Testing full integration: OpenAI embedding + Pinecone query...');
 
@@ -119,8 +119,25 @@ export async function GET(request: NextRequest) {
         const embedding = embeddingResponse.data[0].embedding;
         console.log('Got embedding, dimensions:', embedding.length);
 
-        // Step 2: Query Pinecone with the real embedding
-        const queryWithEmbedding = await index.query({
+        // Step 2a: Query Pinecone WITHOUT filter
+        const queryNoFilter = await index.query({
+          vector: embedding,
+          topK: 5,
+          includeMetadata: true,
+        });
+
+        results.queryWithEmbeddingNoFilter = {
+          success: true,
+          embeddingDimensions: embedding.length,
+          pineconeMatches: queryNoFilter.matches?.length || 0,
+          firstMatch: queryNoFilter.matches?.[0] ? {
+            id: queryNoFilter.matches[0].id,
+            score: queryNoFilter.matches[0].score,
+          } : null,
+        };
+
+        // Step 2b: Query Pinecone WITH filter
+        const queryWithFilter = await index.query({
           vector: embedding,
           topK: 5,
           includeMetadata: true,
@@ -130,17 +147,16 @@ export async function GET(request: NextRequest) {
           },
         });
 
-        results.fullIntegration = {
+        results.queryWithEmbeddingWithFilter = {
           success: true,
-          embeddingDimensions: embedding.length,
-          pineconeMatches: queryWithEmbedding.matches?.length || 0,
-          firstMatch: queryWithEmbedding.matches?.[0] ? {
-            id: queryWithEmbedding.matches[0].id,
-            score: queryWithEmbedding.matches[0].score,
+          pineconeMatches: queryWithFilter.matches?.length || 0,
+          firstMatch: queryWithFilter.matches?.[0] ? {
+            id: queryWithFilter.matches[0].id,
+            score: queryWithFilter.matches[0].score,
           } : null,
         };
       } catch (integrationError: any) {
-        results.fullIntegrationError = {
+        results.integrationError = {
           message: integrationError.message,
           name: integrationError.name,
           cause: integrationError.cause ? JSON.stringify(integrationError.cause) : undefined,
