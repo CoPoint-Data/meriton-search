@@ -2,13 +2,11 @@
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getIndexName, withPineconeErrorHandling, PineconeError } from '@/lib/pinecone';
-import { retryOperation, validateMetadataFilter } from '@/lib/pinecone-retry';
-import { measureOperation } from '@/lib/pinecone-logger';
+import { PineconeError } from '@/lib/pinecone';
+import { validateMetadataFilter } from '@/lib/pinecone-retry';
 import { SearchResponse, SearchResult, ROLE_HIERARCHY } from '@/lib/types';
 import { validateSession, roleToString } from '@/lib/auth';
 import { Role } from '@prisma/client';
-import OpenAI from 'openai';
 
 // Dynamic import for Pinecone to avoid bundling issues on Vercel
 async function getPineconeIndex(indexName: string) {
@@ -21,12 +19,6 @@ async function getPineconeIndex(indexName: string) {
   return pc.Index(indexName);
 }
 
-// Lazy-load OpenAI client
-function getOpenAI() {
-  return new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
-}
 
 // Entity detection: check if user is asking for entity-level view
 function detectEntityQuery(query: string): 'vendor' | 'customer' | 'equipment' | null {
@@ -59,7 +51,28 @@ function detectEntityQuery(query: string): 'vendor' | 'customer' | 'equipment' |
   return null;
 }
 
-// Generate visualization data for various result types
+// Detect if query is about regional/geographic data
+function isRegionalQuery(query: string): boolean {
+  const lowerQuery = query.toLowerCase();
+  const regionalPatterns = [
+    /\b(region|regions|regional)\b/,
+    /\b(by state|by region|per state|per region)\b/,
+    /\b(geographic|geographical|geography)\b/,
+    /\b(location|locations|where)\b.*\b(most|highest|lowest|distribution)\b/,
+    /\b(compare|comparison)\b.*\b(states?|regions?)\b/,
+    /\b(states?|regions?)\b.*\b(compare|comparison)\b/,
+    /\b(breakdown|distribution|split)\b.*\b(by|per)\b.*\b(state|region|location)\b/,
+    /\b(state|region|location)\b.*\b(breakdown|distribution|split)\b/,
+    /\b(northwest|northeast|southwest|southeast|midwest|west|south central|north central)\b/,
+    /\b(map|mapping|mapped)\b/,
+    /\bby (state|region)\b/,
+    /\b(across|throughout)\b.*\b(states?|regions?|country)\b/,
+  ];
+
+  return regionalPatterns.some(pattern => pattern.test(lowerQuery));
+}
+
+// Generate visualization data for various result types - ADDITIVE approach
 function generateVisualization(
   sources: SearchResult[],
   entityType: 'vendor' | 'customer' | 'equipment' | null,
@@ -67,366 +80,353 @@ function generateVisualization(
 ): any {
   if (!sources || sources.length === 0) return null;
 
-  // Vendor visualizations
-  if (entityType === 'vendor') {
-    return {
-      charts: [
-        {
-          type: 'bar',
-          title: 'Invoices by Vendor',
-          data: sources.map(s => ({
-            label: s.metadata?.vendor_name || 'Unknown',
-            value: s.metadata?.invoice_count || 0,
-          })),
-          xAxis: 'Vendor',
-          yAxis: 'Invoice Count',
-        },
-        {
-          type: 'bar',
-          title: 'Total Amount by Vendor',
-          data: sources.map(s => ({
-            label: s.metadata?.vendor_name || 'Unknown',
-            value: s.metadata?.total_amount || 0,
-          })),
-          xAxis: 'Vendor',
-          yAxis: 'Total Amount ($)',
-        },
-      ],
-    };
-  }
+  // Check if this is a regional query - only then should we consider using maps
+  const isRegional = isRegionalQuery(query);
 
-  // Financial/Invoice visualizations
-  if (sources.some(s => s.metadata?.domain === 'financial')) {
-    const paymentStatusData: Record<string, number> = {};
-    const serviceTypeData: Record<string, number> = {};
-    const monthlyData: Record<string, number> = {};
+  // Collect ALL applicable charts - additive approach
+  const charts: any[] = [];
 
-    sources.forEach(s => {
-      // Payment status
-      const status = s.metadata?.payment_status || 'unknown';
-      paymentStatusData[status] = (paymentStatusData[status] || 0) + 1;
+  // === COLLECT DATA FROM ALL SOURCES ===
+  const recordTypeData: Record<string, number> = {};
+  const regionData: Record<string, number> = {};
+  const vendorData: Record<string, number> = {};
+  const paymentStatusData: Record<string, number> = {};
+  const serviceTypeData: Record<string, number> = {};
+  const monthlyData: Record<string, number> = {};
+  const leadSourceData: Record<string, number> = {};
+  const stageData: Record<string, number> = {};
+  const channelData: Record<string, number> = {};
+  const manufacturerData: Record<string, number> = {};
+  const warehouseData: Record<string, number> = {};
+  const conditionData: Record<string, number> = {};
+  const equipmentTypeData: Record<string, number> = {};
+  const reorderData: Record<string, number> = { 'Needs Reorder': 0, 'Stock OK': 0 };
+  let hasReorderData = false;
 
-      // Service type
-      const serviceType = s.metadata?.service_type || 'unknown';
-      serviceTypeData[serviceType] = (serviceTypeData[serviceType] || 0) + 1;
-
-      // Monthly trend
-      if (s.metadata?.date) {
-        const month = s.metadata.date.substring(0, 7); // YYYY-MM
-        monthlyData[month] = (monthlyData[month] || 0) + (s.metadata?.amount || 0);
-      }
-    });
-
-    return {
-      charts: [
-        {
-          type: 'pie',
-          title: 'Payment Status Distribution',
-          data: Object.entries(paymentStatusData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-        },
-        {
-          type: 'bar',
-          title: 'Service Type Distribution',
-          data: Object.entries(serviceTypeData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-          xAxis: 'Service Type',
-          yAxis: 'Count',
-        },
-        {
-          type: 'line',
-          title: 'Monthly Invoice Amounts',
-          data: Object.entries(monthlyData)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([label, value]) => ({
-              label,
-              value,
-            })),
-          xAxis: 'Month',
-          yAxis: 'Amount ($)',
-        },
-      ],
-    };
-  }
-
-  // CRM visualizations (contacts, deals, activities)
-  if (sources.some(s => s.metadata?.domain === 'crm')) {
-    const recordTypeData: Record<string, number> = {};
-    const leadSourceData: Record<string, number> = {};
-    const stageData: Record<string, number> = {};
-    const stateData: Record<string, number> = {};
-
-    sources.forEach(s => {
-      const recordType = s.metadata?.record_type || 'unknown';
+  sources.forEach(s => {
+    // Record type
+    const recordType = s.metadata?.record_type || 'unknown';
+    if (recordType !== 'unknown') {
       recordTypeData[recordType] = (recordTypeData[recordType] || 0) + 1;
-
-      // Lead source for contacts and leads
-      const leadSource = s.metadata?.lead_source;
-      if (leadSource) {
-        leadSourceData[leadSource] = (leadSourceData[leadSource] || 0) + 1;
-      }
-
-      // Stage for deals
-      const stage = s.metadata?.stage;
-      if (stage) {
-        stageData[stage] = (stageData[stage] || 0) + 1;
-      }
-
-      const state = s.metadata?.state || 'unknown';
-      if (state !== 'unknown') {
-        stateData[state] = (stateData[state] || 0) + 1;
-      }
-    });
-
-    const charts: any[] = [];
-
-    // Show record type distribution if mixed CRM types
-    if (Object.keys(recordTypeData).length > 1) {
-      charts.push({
-        type: 'pie',
-        title: 'CRM Record Types',
-        data: Object.entries(recordTypeData).map(([label, value]) => ({
-          label: label.replace(/_/g, ' '),
-          value,
-        })),
-      });
     }
 
-    // Show lead source distribution if available
-    if (Object.keys(leadSourceData).length > 0) {
-      charts.push({
-        type: 'pie',
-        title: 'Lead Source Distribution',
-        data: Object.entries(leadSourceData).map(([label, value]) => ({
-          label: label.replace(/_/g, ' '),
-          value,
-        })),
-      });
+    // Region/State
+    const region = s.metadata?.region || 'unknown';
+    if (region !== 'unknown') {
+      regionData[region] = (regionData[region] || 0) + 1;
     }
 
-    // Show deal stages if available
-    if (Object.keys(stageData).length > 0) {
-      charts.push({
-        type: 'bar',
-        title: 'Deals by Stage',
-        data: Object.entries(stageData).map(([label, value]) => ({
-          label: label.replace(/_/g, ' '),
-          value,
-        })),
-        xAxis: 'Stage',
-        yAxis: 'Count',
-      });
+    // Vendor
+    const vendor = s.metadata?.vendor;
+    if (vendor) {
+      vendorData[vendor] = (vendorData[vendor] || 0) + 1;
     }
 
-    // Show state distribution if available
-    if (Object.keys(stateData).length > 1) {
-      charts.push({
-        type: 'bar',
-        title: 'By State',
-        data: Object.entries(stateData)
-          .sort(([,a], [,b]) => b - a)
-          .slice(0, 10)
-          .map(([label, value]) => ({
-            label,
-            value,
-          })),
-        xAxis: 'State',
-        yAxis: 'Count',
-      });
+    // Payment status (financial)
+    const paymentStatus = s.metadata?.payment_status;
+    if (paymentStatus) {
+      paymentStatusData[paymentStatus] = (paymentStatusData[paymentStatus] || 0) + 1;
     }
 
-    if (charts.length > 0) {
-      return { charts };
+    // Service type (financial)
+    const serviceType = s.metadata?.service_type;
+    if (serviceType) {
+      serviceTypeData[serviceType] = (serviceTypeData[serviceType] || 0) + 1;
     }
-  }
 
-  // Equipment visualizations (legacy field_service domain)
-  if (sources.some(s => s.metadata?.domain === 'field_service')) {
-    const conditionData: Record<string, number> = {};
-    const typeData: Record<string, number> = {};
+    // Monthly trend
+    if (s.metadata?.date && s.metadata?.amount) {
+      const month = s.metadata.date.substring(0, 7); // YYYY-MM
+      monthlyData[month] = (monthlyData[month] || 0) + s.metadata.amount;
+    }
 
-    sources.forEach(s => {
-      const condition = s.metadata?.condition || 'unknown';
-      conditionData[condition] = (conditionData[condition] || 0) + 1;
+    // Lead source (CRM/marketing)
+    const leadSource = s.metadata?.lead_source;
+    if (leadSource) {
+      leadSourceData[leadSource] = (leadSourceData[leadSource] || 0) + 1;
+    }
 
-      const type = s.metadata?.equipment_type || 'unknown';
-      typeData[type] = (typeData[type] || 0) + 1;
-    });
+    // Deal stage (CRM)
+    const stage = s.metadata?.stage;
+    if (stage) {
+      stageData[stage] = (stageData[stage] || 0) + 1;
+    }
 
-    return {
-      charts: [
-        {
-          type: 'pie',
-          title: 'Equipment Condition Distribution',
-          data: Object.entries(conditionData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-        },
-        {
-          type: 'bar',
-          title: 'Equipment by Type',
-          data: Object.entries(typeData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-          xAxis: 'Equipment Type',
-          yAxis: 'Count',
-        },
-      ],
-    };
-  }
+    // Marketing channel
+    const channel = s.metadata?.channel;
+    if (channel) {
+      channelData[channel] = (channelData[channel] || 0) + 1;
+    }
 
-  // Inventory visualizations (stock_item records)
-  if (sources.some(s => s.metadata?.domain === 'inventory' || s.metadata?.record_type === 'stock_item')) {
-    const manufacturerData: Record<string, number> = {};
-    const warehouseData: Record<string, number> = {};
-    const reorderData: Record<string, number> = { 'Needs Reorder': 0, 'Stock OK': 0 };
-    let totalValue = 0;
-
-    sources.forEach(s => {
-      const manufacturer = s.metadata?.manufacturer || 'unknown';
+    // Manufacturer (inventory)
+    const manufacturer = s.metadata?.manufacturer;
+    if (manufacturer) {
       manufacturerData[manufacturer] = (manufacturerData[manufacturer] || 0) + 1;
+    }
 
-      const warehouse = s.metadata?.warehouse_location || 'unknown';
+    // Warehouse (inventory)
+    const warehouse = s.metadata?.warehouse_location;
+    if (warehouse) {
       warehouseData[warehouse] = (warehouseData[warehouse] || 0) + 1;
+    }
 
-      if (s.metadata?.needs_reorder) {
+    // Equipment condition
+    const condition = s.metadata?.condition;
+    if (condition) {
+      conditionData[condition] = (conditionData[condition] || 0) + 1;
+    }
+
+    // Equipment type
+    const equipmentType = s.metadata?.equipment_type;
+    if (equipmentType) {
+      equipmentTypeData[equipmentType] = (equipmentTypeData[equipmentType] || 0) + 1;
+    }
+
+    // Reorder status
+    if (s.metadata?.needs_reorder !== undefined) {
+      hasReorderData = true;
+      if (s.metadata.needs_reorder) {
         reorderData['Needs Reorder']++;
       } else {
         reorderData['Stock OK']++;
       }
-
-      totalValue += s.metadata?.total_value || 0;
-    });
-
-    return {
-      charts: [
-        {
-          type: 'pie',
-          title: 'Items by Manufacturer',
-          data: Object.entries(manufacturerData)
-            .sort(([,a], [,b]) => b - a)
-            .slice(0, 7)
-            .map(([label, value]) => ({
-              label,
-              value,
-            })),
-        },
-        {
-          type: 'bar',
-          title: 'Items by Warehouse',
-          data: Object.entries(warehouseData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-          xAxis: 'Warehouse',
-          yAxis: 'Count',
-        },
-        {
-          type: 'pie',
-          title: 'Reorder Status',
-          data: Object.entries(reorderData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-        },
-      ],
-    };
-  }
-
-  // Marketing visualizations
-  if (sources.some(s => s.metadata?.domain === 'marketing')) {
-    const channelData: Record<string, number> = {};
-    const sourceData: Record<string, number> = {};
-
-    sources.forEach(s => {
-      const channel = s.metadata?.channel || 'unknown';
-      channelData[channel] = (channelData[channel] || 0) + 1;
-
-      const leadSource = s.metadata?.lead_source || 'unknown';
-      sourceData[leadSource] = (sourceData[leadSource] || 0) + 1;
-    });
-
-    return {
-      charts: [
-        {
-          type: 'pie',
-          title: 'Marketing Channel Distribution',
-          data: Object.entries(channelData).map(([label, value]) => ({
-            label,
-            value,
-          })),
-        },
-        {
-          type: 'bar',
-          title: 'Lead Sources',
-          data: Object.entries(sourceData)
-            .sort(([,a], [,b]) => b - a)
-            .slice(0, 7)
-            .map(([label, value]) => ({
-              label,
-              value,
-            })),
-          xAxis: 'Source',
-          yAxis: 'Count',
-        },
-      ],
-    };
-  }
-
-  // Generic visualization for mixed results - by record type
-  const recordTypeData: Record<string, number> = {};
-  const regionData: Record<string, number> = {};
-
-  sources.forEach(s => {
-    const recordType = s.metadata?.record_type || 'unknown';
-    recordTypeData[recordType] = (recordTypeData[recordType] || 0) + 1;
-
-    const region = s.metadata?.region || s.metadata?.state || 'unknown';
-    if (region !== 'unknown') {
-      regionData[region] = (regionData[region] || 0) + 1;
     }
   });
 
-  // Only return charts if we have meaningful data
-  if (Object.keys(recordTypeData).length > 1 || Object.keys(regionData).length > 1) {
-    const charts: any[] = [];
+  // === VENDOR ENTITY VIEW ===
+  if (entityType === 'vendor') {
+    charts.push({
+      type: 'bar',
+      title: 'Invoices by Vendor',
+      data: sources.slice(0, 10).map(s => ({
+        label: s.metadata?.vendor_name || 'Unknown',
+        value: s.metadata?.invoice_count || 0,
+      })),
+      xAxis: 'Vendor',
+      yAxis: 'Invoice Count',
+    });
+    charts.push({
+      type: 'bar',
+      title: 'Total Amount by Vendor',
+      data: sources.slice(0, 10).map(s => ({
+        label: s.metadata?.vendor_name || 'Unknown',
+        value: s.metadata?.total_amount || 0,
+      })),
+      xAxis: 'Vendor',
+      yAxis: 'Total Amount ($)',
+    });
+  }
 
-    if (Object.keys(recordTypeData).length > 1) {
-      charts.push({
-        type: 'pie',
-        title: 'Results by Record Type',
-        data: Object.entries(recordTypeData).map(([label, value]) => ({
+  // === MAP CHART (only for regional queries) ===
+  if (isRegional && Object.keys(regionData).length > 1) {
+    charts.push({
+      type: 'map',
+      title: 'Results by Region',
+      data: Object.entries(regionData)
+        .sort(([,a], [,b]) => b - a)
+        .map(([label, value]) => ({
+          label,
+          value,
+        })),
+    });
+  }
+
+  // === RECORD TYPE PIE (if multiple types) ===
+  if (Object.keys(recordTypeData).length > 1) {
+    charts.push({
+      type: 'pie',
+      title: 'Results by Record Type',
+      data: Object.entries(recordTypeData).map(([label, value]) => ({
+        label: label.replace(/_/g, ' '),
+        value,
+      })),
+    });
+  }
+
+  // === PAYMENT STATUS PIE (financial) ===
+  if (Object.keys(paymentStatusData).length > 1) {
+    charts.push({
+      type: 'pie',
+      title: 'Payment Status',
+      data: Object.entries(paymentStatusData).map(([label, value]) => ({
+        label: label.replace(/_/g, ' '),
+        value,
+      })),
+    });
+  }
+
+  // === SERVICE TYPE BAR (financial) ===
+  if (Object.keys(serviceTypeData).length > 1) {
+    charts.push({
+      type: 'bar',
+      title: 'By Service Type',
+      data: Object.entries(serviceTypeData)
+        .filter(([label]) => label !== 'unknown')
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 8)
+        .map(([label, value]) => ({
           label: label.replace(/_/g, ' '),
           value,
         })),
-      });
-    }
+      xAxis: 'Service Type',
+      yAxis: 'Count',
+    });
+  }
 
-    if (Object.keys(regionData).length > 1) {
-      charts.push({
-        type: 'bar',
-        title: 'Results by Region',
-        data: Object.entries(regionData)
-          .sort(([,a], [,b]) => b - a)
-          .slice(0, 10)
-          .map(([label, value]) => ({
-            label,
-            value,
-          })),
-        xAxis: 'Region',
-        yAxis: 'Count',
-      });
-    }
+  // === MONTHLY LINE CHART (financial with amounts) ===
+  if (Object.keys(monthlyData).length > 2) {
+    charts.push({
+      type: 'line',
+      title: 'Monthly Amounts',
+      data: Object.entries(monthlyData)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([label, value]) => ({
+          label,
+          value,
+        })),
+      xAxis: 'Month',
+      yAxis: 'Amount ($)',
+    });
+  }
 
-    if (charts.length > 0) {
-      return { charts };
-    }
+  // === TOP VENDORS BAR (if not already showing vendor entity view) ===
+  if (entityType !== 'vendor' && Object.keys(vendorData).length > 1) {
+    charts.push({
+      type: 'bar',
+      title: 'Top Vendors',
+      data: Object.entries(vendorData)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 8)
+        .map(([label, value]) => ({
+          label,
+          value,
+        })),
+      xAxis: 'Vendor',
+      yAxis: 'Count',
+    });
+  }
+
+  // === LEAD SOURCE PIE (CRM/marketing) ===
+  if (Object.keys(leadSourceData).length > 1) {
+    charts.push({
+      type: 'pie',
+      title: 'Lead Sources',
+      data: Object.entries(leadSourceData)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 6)
+        .map(([label, value]) => ({
+          label: label.replace(/_/g, ' '),
+          value,
+        })),
+    });
+  }
+
+  // === DEAL STAGES BAR (CRM) ===
+  if (Object.keys(stageData).length > 1) {
+    charts.push({
+      type: 'bar',
+      title: 'Deals by Stage',
+      data: Object.entries(stageData).map(([label, value]) => ({
+        label: label.replace(/_/g, ' '),
+        value,
+      })),
+      xAxis: 'Stage',
+      yAxis: 'Count',
+    });
+  }
+
+  // === MARKETING CHANNELS PIE ===
+  if (Object.keys(channelData).length > 1) {
+    charts.push({
+      type: 'pie',
+      title: 'Marketing Channels',
+      data: Object.entries(channelData).map(([label, value]) => ({
+        label: label.replace(/_/g, ' '),
+        value,
+      })),
+    });
+  }
+
+  // === MANUFACTURER PIE (inventory) ===
+  if (Object.keys(manufacturerData).length > 1) {
+    charts.push({
+      type: 'pie',
+      title: 'By Manufacturer',
+      data: Object.entries(manufacturerData)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 7)
+        .map(([label, value]) => ({
+          label,
+          value,
+        })),
+    });
+  }
+
+  // === WAREHOUSE BAR (inventory) ===
+  if (Object.keys(warehouseData).length > 1) {
+    charts.push({
+      type: 'bar',
+      title: 'By Warehouse',
+      data: Object.entries(warehouseData).map(([label, value]) => ({
+        label,
+        value,
+      })),
+      xAxis: 'Warehouse',
+      yAxis: 'Count',
+    });
+  }
+
+  // === EQUIPMENT CONDITION PIE ===
+  if (Object.keys(conditionData).length > 1) {
+    charts.push({
+      type: 'pie',
+      title: 'Equipment Condition',
+      data: Object.entries(conditionData).map(([label, value]) => ({
+        label,
+        value,
+      })),
+    });
+  }
+
+  // === EQUIPMENT TYPE BAR ===
+  if (Object.keys(equipmentTypeData).length > 1) {
+    charts.push({
+      type: 'bar',
+      title: 'Equipment Types',
+      data: Object.entries(equipmentTypeData).map(([label, value]) => ({
+        label: label.replace(/_/g, ' '),
+        value,
+      })),
+      xAxis: 'Type',
+      yAxis: 'Count',
+    });
+  }
+
+  // === REORDER STATUS PIE (inventory) ===
+  if (hasReorderData && (reorderData['Needs Reorder'] > 0 || reorderData['Stock OK'] > 0)) {
+    charts.push({
+      type: 'pie',
+      title: 'Reorder Status',
+      data: Object.entries(reorderData).map(([label, value]) => ({
+        label,
+        value,
+      })),
+    });
+  }
+
+  // Limit to most relevant charts (max 4 to avoid clutter)
+  const maxCharts = 4;
+  if (charts.length > maxCharts) {
+    // Prioritize: map first (if regional), then pie, then bar, then line
+    const prioritized = charts.sort((a, b) => {
+      const priority: Record<string, number> = { map: 0, pie: 1, bar: 2, line: 3 };
+      return (priority[a.type] || 4) - (priority[b.type] || 4);
+    });
+    return { charts: prioritized.slice(0, maxCharts) };
+  }
+
+  if (charts.length > 0) {
+    return { charts };
   }
 
   return null;
@@ -511,8 +511,8 @@ function aggregateVendorEntities(results: any[]): SearchResult[] {
   return entities.sort((a, b) => (b.score || 0) - (a.score || 0));
 }
 
-// Function tool definitions for OpenAI
-const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+// Tool definitions for OpenAI function calling
+const tools: any[] = [
   {
     type: 'function',
     function: {
@@ -529,6 +529,22 @@ const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             type: 'string',
             enum: ['invoice', 'expense', 'gl_entry', 'contact', 'deal', 'activity', 'campaign', 'lead', 'stock_item', 'regional_summary'],
             description: 'Optionally filter by specific record type',
+          },
+          amount_min: {
+            type: 'number',
+            description: 'Minimum amount filter. Use for queries like "over $1000", "greater than 5000", "more than $500", "at least $100"',
+          },
+          amount_max: {
+            type: 'number',
+            description: 'Maximum amount filter. Use for queries like "under $1000", "less than 5000", "below $500", "at most $100"',
+          },
+          vendor: {
+            type: 'string',
+            description: 'Filter by vendor/supplier name. Use for queries like "invoices from Carrier", "American Standard purchases"',
+          },
+          region: {
+            type: 'string',
+            description: 'Filter by region. Use for queries like "Southwest region", "Northeast data"',
           },
           top_k: {
             type: 'number',
@@ -562,14 +578,17 @@ const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
             enum: ['emergency_repair', 'scheduled_repair', 'preventive_maintenance', 'installation_new', 'retrofit', 'diagnostic'],
             description: 'Filter by type of service (optional)',
           },
-          fiscal_year: {
-            type: 'string',
-            description: 'Filter by fiscal year (e.g., "2024") (optional)',
+          amount_min: {
+            type: 'number',
+            description: 'Minimum amount filter. Use for queries like "over $1000", "greater than 5000", "at least $500"',
           },
-          fiscal_quarter: {
+          amount_max: {
+            type: 'number',
+            description: 'Maximum amount filter. Use for queries like "under $1000", "less than 5000", "at most $500"',
+          },
+          vendor: {
             type: 'string',
-            enum: ['Q1', 'Q2', 'Q3', 'Q4'],
-            description: 'Filter by fiscal quarter (optional)',
+            description: 'Filter by vendor/supplier name. Use for queries like "Carrier invoices", "American Standard"',
           },
           top_k: {
             type: 'number',
@@ -671,9 +690,6 @@ async function executeToolCall(
 ): Promise<any> {
   console.log('[executeToolCall] Step 1: Starting...');
 
-  const openai = getOpenAI();
-  console.log('[executeToolCall] Step 2: OpenAI client created');
-
   // Create Pinecone client inline (exactly like debug endpoint that works)
   console.log('[executeToolCall] Step 3: Importing Pinecone...');
   const { Pinecone } = await import('@pinecone-database/pinecone');
@@ -705,20 +721,34 @@ async function executeToolCall(
     console.log(`Using fallback query for ${toolName}: LLM provided "${args.query}", using original "${searchQuery}"`);
   }
 
-  // Generate embedding
+  // Generate embedding using raw fetch (OpenAI SDK has connection issues on Vercel)
   console.log('[executeToolCall] Step 8: Generating embedding for query:', searchQuery.substring(0, 50));
-  let embeddingResponse;
+  let queryEmbedding: number[];
   try {
-    embeddingResponse = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: searchQuery,
+    const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'text-embedding-3-small',
+        input: searchQuery,
+      }),
     });
-    console.log('[executeToolCall] Step 9: Embedding generated, dimensions:', embeddingResponse.data[0].embedding.length);
+
+    if (!embeddingResponse.ok) {
+      const errorData = await embeddingResponse.json();
+      throw new Error(`OpenAI embedding API error: ${embeddingResponse.status} - ${JSON.stringify(errorData)}`);
+    }
+
+    const embeddingData = await embeddingResponse.json();
+    queryEmbedding = embeddingData.data[0].embedding;
+    console.log('[executeToolCall] Step 9: Embedding generated, dimensions:', queryEmbedding.length);
   } catch (embError: any) {
     console.error('[executeToolCall] EMBEDDING ERROR:', embError.message);
     throw embError;
   }
-  const queryEmbedding = embeddingResponse.data[0].embedding;
 
   // Build filter with SERVER-SIDE security enforcement
   const filter: any = {};
@@ -769,12 +799,6 @@ async function executeToolCall(
   if (args.service_type) {
     filter.service_type = { $eq: args.service_type };
   }
-  if (args.fiscal_year) {
-    filter.fiscal_year = { $eq: args.fiscal_year };
-  }
-  if (args.fiscal_quarter) {
-    filter.fiscal_quarter = { $eq: args.fiscal_quarter };
-  }
   if (args.customer_type) {
     filter.customer_type = { $eq: args.customer_type };
   }
@@ -796,6 +820,33 @@ async function executeToolCall(
   if (args.warranty_status) {
     filter.warranty_status = { $eq: args.warranty_status };
   }
+
+  // Amount range filters (for numeric filtering)
+  if (args.amount_min !== undefined && args.amount_min !== null) {
+    filter.amount = filter.amount || {};
+    filter.amount.$gte = args.amount_min;
+    console.log('[executeToolCall] Applying amount_min filter:', args.amount_min);
+  }
+  if (args.amount_max !== undefined && args.amount_max !== null) {
+    filter.amount = filter.amount || {};
+    filter.amount.$lte = args.amount_max;
+    console.log('[executeToolCall] Applying amount_max filter:', args.amount_max);
+  }
+
+  // Vendor filter (text match)
+  if (args.vendor) {
+    filter.vendor = { $eq: args.vendor };
+    console.log('[executeToolCall] Applying vendor filter:', args.vendor);
+  }
+
+  // Region filter
+  if (args.region) {
+    filter.region = { $eq: args.region };
+    console.log('[executeToolCall] Applying region filter:', args.region);
+  }
+
+  // Note: Year filtering is done via query text (semantic search), not metadata filter
+  // because invoice records only have 'date' string field, not 'year' number field
 
   // Validate filter before querying
   if (Object.keys(filter).length > 0) {
@@ -945,12 +996,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('Initializing OpenAI...');
-    const openai = getOpenAI();
-    console.log('OpenAI initialized, calling API...');
+    console.log('Calling OpenAI API via raw fetch...');
+
+    // Helper function for OpenAI chat completions via raw fetch (SDK has connection issues on Vercel)
+    async function callOpenAIChatCompletion(requestBody: any) {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`OpenAI API error: ${response.status} - ${JSON.stringify(errorData)}`);
+      }
+
+      return response.json();
+    }
 
     // Initial LLM call with function calling
-    const initialResponse = await openai.chat.completions.create({
+    const initialResponse = await callOpenAIChatCompletion({
       model: 'gpt-4o-mini',
       messages: [
         {
@@ -965,9 +1033,11 @@ You have access to four search tools. Each tool REQUIRES a query parameter:
    - Use this for queries like "list all equipment", "show me everything", "find all records", "list everything from Carrier"
    - Returns up to 25 results by default
    - Can optionally filter by record_type: invoice, expense, gl_entry, contact, deal, activity, campaign, lead, stock_item, regional_summary
+   - IMPORTANT: For date/year/quarter filtering, include the time period in the query text (e.g., "Q4 2023 invoices", "2024 records", "October-December invoices")
 
 2. **search_invoices** - Search billing, payment, and service transaction records
-   - Use filters like payment_status, service_type, fiscal_year when explicitly mentioned
+   - Use filters like payment_status, service_type when explicitly mentioned
+   - IMPORTANT: For date/year/quarter filtering, include the time period in the query text (e.g., "Q4 invoices", "2023 bills")
 
 3. **search_customers** - Search customer information and facility details
    - Use filters like customer_type, city, state when explicitly mentioned
@@ -997,6 +1067,15 @@ User: "List all records"
 
 User: "Show me overdue invoices"
 → Call: search_invoices(query="overdue invoices", payment_status="overdue")
+
+User: "Invoices over $1000" or "purchases greater than 1000"
+→ Call: search_invoices(query="invoices", amount_min=1000)
+
+User: "Invoices under $500"
+→ Call: search_invoices(query="invoices", amount_max=500)
+
+User: "Expenses between $100 and $1000"
+→ Call: search_all(query="expenses", record_type="expense", amount_min=100, amount_max=1000)
 
 User: "Find CRM contacts"
 → Call: search_all(query="CRM contacts", record_type="contact")
@@ -1033,7 +1112,7 @@ User: "Tell me about that"
     }
 
     // Execute tool calls (with server-side security)
-    const toolMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+    const toolMessages: any[] = [];
     const allSources: SearchResult[] = [];
 
     for (const toolCall of toolCalls) {
@@ -1164,7 +1243,7 @@ User: "Tell me about that"
     // Note: customers and equipment are already entity-level, no aggregation needed
 
     // Get final response from LLM
-    const finalResponse = await openai.chat.completions.create({
+    const finalResponse = await callOpenAIChatCompletion({
       model: 'gpt-4o-mini',
       messages: [
         {

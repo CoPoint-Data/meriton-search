@@ -1,20 +1,33 @@
 import SearchInterface from "@/components/SearchInterface";
+import Image from "next/image";
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-900 dark:to-gray-800">
-      <div className="container mx-auto px-4 py-8">
-        <header className="mb-8 text-center">
-          <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2">
-            Meriton Search
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            Search historical transaction data from QuickBooks archives
-          </p>
-        </header>
+    <main className="min-h-screen bg-white dark:bg-meriton-charcoal">
+      {/* Meriton-style Header - Sticky */}
+      <header className="sticky top-0 z-50 bg-white dark:bg-meriton-charcoal border-b border-meriton-light dark:border-meriton-dark shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Image
+                src="/meriton-logo.jpg"
+                alt="Meriton"
+                width={120}
+                height={40}
+                className="object-contain"
+                priority
+              />
+              <span className="text-meriton-silver text-sm font-light hidden sm:inline">|</span>
+              <span className="text-meriton-charcoal dark:text-meriton-silver text-sm font-medium hidden sm:inline">
+                Archive Search
+              </span>
+            </div>
+          </div>
+        </div>
+      </header>
 
-        <SearchInterface />
-      </div>
+      {/* SearchInterface handles its own layout for sticky positioning */}
+      <SearchInterface />
     </main>
   );
 }
