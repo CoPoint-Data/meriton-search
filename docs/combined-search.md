@@ -253,7 +253,7 @@ Used for:
 
 ---
 
-## Putting It Together: A Proven Enterprise Pattern
+## Putting It Together
 
 ```
             ┌──────────────┐
