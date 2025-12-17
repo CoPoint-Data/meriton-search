@@ -1,406 +1,258 @@
-Enterprise LLM Search: Final Data Stores
+# Enterprise LLM Search: Final Data Stores
 
-Think of these not as competitors, but as complementary indexes over the same canonical documents.
+This focuses on the **final retrieval and serving layers** (vector, lexical, graph, etc.) used in an enterprise LLM-powered search system — not upstream systems of record.
 
-1. Vector Databases (Semantic Index)
+The key idea: these are **complementary indexes over the same canonical documents**, not competitors.
 
-Examples
+---
 
-Pinecone
+## 1. Vector Databases (Semantic Index)
 
-Weaviate
+**Examples**
+- Pinecone  
+- Weaviate  
+- Milvus  
+- pgvector (Postgres)  
+- OpenSearch Vector  
+- Azure AI Search (vector mode)
 
-Milvus
-
-pgvector (Postgres)
-
-OpenSearch Vector
-
-Azure AI Search (vector mode)
-
-Role
-
-Semantic recall layer
-
-“Find things about X, even if X isn’t mentioned verbatim.”
+### Role
+**Semantic recall layer**  
+> “Find things *about* X, even if X isn’t mentioned verbatim.”
 
 Used for:
+- Conceptual search
+- Clause similarity
+- “Find similar contracts / invoices / emails”
+- RAG grounding
 
-Conceptual search
+### Strengths
+- Captures meaning, paraphrase, and intent
+- Excellent for messy natural language
+- Language-agnostic
+- Works well on PDFs and OCR’d text
+- Enables chunk-level retrieval
 
-Clause similarity
+### Tradeoffs
+- No notion of *truth* or authority
+- Weak at:
+  - exact dates
+  - IDs
+  - invoice numbers
+  - legal precision
+- Embedding drift over time
+- Costly at scale (memory + compute)
+- Hard to debug false positives
 
-“Find similar contracts / invoices / emails”
+### Best Practices
+- Chunk by **semantic units**, not pages
+- Store rich metadata (doc_id, section, date)
+- Use vectors for *candidate generation*, not final answers
+- Re-rank with lexical or rules
 
-RAG grounding
+---
 
-Strengths
+## 2. Lexical / Inverted Index Search (Elastic-style)
 
-Captures meaning, paraphrase, intent
+**Examples**
+- Elasticsearch  
+- OpenSearch  
+- Solr  
+- Azure AI Search (BM25 mode)
 
-Excellent for messy natural language
-
-Language-agnostic
-
-Works well on PDFs and OCR’d text
-
-Enables chunk-level retrieval
-
-Tradeoffs
-
-No notion of truth or authority
-
-Weak at:
-
-exact dates
-
-IDs
-
-invoice numbers
-
-legal precision
-
-Embedding drift over time
-
-Costly at scale (memory + compute)
-
-Hard to debug false positives
-
-Best Practices
-
-Chunk by semantic units, not pages
-
-Store rich metadata (doc_id, section, date)
-
-Use vectors for candidate generation, not final answers
-
-Re-rank with lexical or rules
-
-2. Lexical / Inverted Index Search (Elastic-style)
-
-Examples
-
-Elasticsearch
-
-OpenSearch
-
-Solr
-
-Azure AI Search (BM25 mode)
-
-Role
-
-Precision & determinism layer
-
-“Find documents that explicitly say X.”
+### Role
+**Precision & determinism layer**  
+> “Find documents that *explicitly say* X.”
 
 Used for:
+- Contract names
+- Invoice numbers
+- Dates
+- Parties
+- Legal citations
+- Audit & compliance search
 
-Contract names
+### Strengths
+- Exact match and phrase match
+- Deterministic and explainable
+- Excellent metadata filtering
+- Mature tooling and operations
+- Fast at large scale
 
-Invoice numbers
+### Tradeoffs
+- Poor semantic understanding
+- Synonym management is manual
+- Brittle to OCR noise
+- Doesn’t “understand” intent
 
-Dates
+### Best Practices
+- Index:
+  - raw text
+  - extracted fields
+  - normalized entities
+- Heavy use of filters and facets
+- Combine with vector recall
 
-Parties
+---
 
-Legal citations
+## 3. Hybrid Search (Vector + Lexical)
 
-Audit & compliance search
+**Examples**
+- Elasticsearch hybrid queries  
+- OpenSearch neural + BM25  
+- Azure AI Search hybrid  
+- Custom fusion layers
 
-Strengths
-
-Exact match, phrase match, filters
-
-Deterministic and explainable
-
-Excellent metadata filtering
-
-Mature tooling and ops
-
-Fast at large scale
-
-Tradeoffs
-
-Poor semantic understanding
-
-Synonym management is manual
-
-Brittle to OCR noise
-
-Doesn’t “understand” intent
-
-Best Practices
-
-Index:
-
-raw text
-
-extracted fields
-
-normalized entities
-
-Heavy use of filters + facets
-
-Combine with vector recall
-
-3. Hybrid Search (Vector + Lexical)
-
-Examples
-
-Elasticsearch hybrid queries
-
-OpenSearch neural + BM25
-
-Azure AI Search hybrid
-
-Custom fusion layers
-
-Role
-
-Primary enterprise search workhorse
-
-“Find the right documents reliably.”
+### Role
+**Primary enterprise search workhorse**  
+> “Find the *right* documents reliably.”
 
 Used for:
+- Contract discovery
+- Diligence review
+- Invoice investigations
+- Email search
 
-Contract discovery
+### Strengths
+- High recall + high precision
+- Better trust with legal and finance users
+- Reduced hallucinations in RAG
+- Flexible ranking strategies
 
-Diligence review
+### Tradeoffs
+- More complex tuning
+- Query orchestration required
+- Requires observability to debug
 
-Invoice investigations
+### Typical Pattern
+1. Vector search → top N candidates  
+2. Lexical filter → narrow and validate  
+3. Re-rank (cross-encoder or rules)  
+4. Send top K to LLM  
 
-Email search
+---
 
-Strengths
+## 4. Knowledge Graphs (Relational Memory)
 
-High recall + high precision
+**Examples**
+- Neo4j  
+- Neptune  
+- ArangoDB  
+- TigerGraph  
 
-Better trust with legal/finance users
-
-Reduced hallucinations in RAG
-
-Flexible ranking strategies
-
-Tradeoffs
-
-More complex tuning
-
-Query orchestration required
-
-Requires observability to debug
-
-Typical Pattern
-
-Vector search → top N candidates
-
-Lexical filter → narrow + validate
-
-Re-rank (cross-encoder or rules)
-
-Send top K to LLM
-
-4. Knowledge Graphs (Relational Memory)
-
-Examples
-
-Neo4j
-
-Neptune
-
-ArangoDB
-
-TigerGraph
-
-Role
-
-Entity & relationship layer
-
-“How are these things connected?”
+### Role
+**Entity & relationship layer**  
+> “How are these things connected?”
 
 Used for:
+- M&A entity relationships
+- Contract parties and subsidiaries
+- Obligation chains
+- Email ↔ deal ↔ document links
 
-M&A entity relationships
+### Strengths
+- Explicit relationships
+- Temporal reasoning
+- Excellent for:
+  - ownership
+  - counterparty networks
+  - deal structures
+- Explainable reasoning paths
 
-Contract parties and subsidiaries
+### Tradeoffs
+- Expensive to build correctly
+- Requires high-quality extraction
+- Poor at raw text search
+- Not a drop-in replacement for search
 
-Obligation chains
+### Best Practices
+- Graph is *derived*, not primary
+- Store IDs and edges, not text blobs
+- Query graph → fetch documents via search
 
-Email ↔ deal ↔ document links
+---
 
-Strengths
+## 5. Relational Databases (Structured Authority)
 
-Explicit relationships
+**Examples**
+- Postgres  
+- SQL Server  
+- Aurora  
+- CockroachDB  
 
-Temporal reasoning
-
-Excellent for:
-
-ownership
-
-counterparty networks
-
-deal structures
-
-Explainable reasoning paths
-
-Tradeoffs
-
-Expensive to build correctly
-
-Requires high-quality extraction
-
-Poor at raw text search
-
-Not a drop-in replacement for search
-
-Best Practices
-
-Graph is derived, not primary
-
-Store IDs + edges, not text blobs
-
-Query graph → fetch docs via search
-
-5. Relational Databases (Structured Authority)
-
-Examples
-
-Postgres
-
-SQL Server
-
-Aurora
-
-CockroachDB
-
-Role
-
-Source of truth for facts
-
-“What is actually true?”
+### Role
+**Source of truth for facts**  
+> “What is actually true?”
 
 Used for:
+- Invoice totals
+- Contract dates
+- Renewal flags
+- Deal milestones
 
-Invoice totals
+### Strengths
+- Strong consistency
+- Constraints and validation
+- Ideal for audit workflows
+- Cheap relative to vector stores
 
-Contract dates
+### Tradeoffs
+- Not suitable for text retrieval
+- Schema evolution is costly
+- Needs orchestration with search
 
-Renewal flags
+### Best Practices
+- LLM should **query**, not summarize blindly
+- Use as validation layer post-retrieval
 
-Deal milestones
+---
 
-Strengths
+## 6. Object Storage + Chunk Indexes
 
-Strong consistency
+**Examples**
+- S3 + metadata database  
+- GCS / Azure Blob  
+- Content-addressed stores  
 
-Constraints & validation
+### Role
+**Cold storage & traceability**  
+> “This exact document version was used.”
 
-Ideal for audit workflows
+### Strengths
+- Cheap
+- Immutable
+- Required for audit and replay
+- Supports versioning
 
-Cheap relative to vector stores
+### Tradeoffs
+- Not searchable alone
+- Requires indexes on top
 
-Tradeoffs
+---
 
-Not suitable for text retrieval
+## 7. Reranking & Scoring Layer (Often Overlooked)
 
-Schema evolution is costly
+**Examples**
+- Cross-encoder models
+- LLM scoring
+- Rules engines
 
-Needs orchestration with search
+### Role
+**Final relevance judgment**  
+> “Which of these is actually best?”
 
-Best Practices
+### Strengths
+- Massive relevance lift
+- Reduces hallucinations
+- Aligns results with user intent
 
-LLM should query, not summarize blindly
+### Tradeoffs
+- Compute heavy
+- Latency impact
+- Needs careful caching
 
-Use as validation layer post-retrieval
+---
 
-6. Object Storage + Chunk Indexes
+## Putting It Together: A Proven Enterprise Pattern
 
-Examples
-
-S3 + metadata DB
-
-GCS / Azure Blob
-
-Content-addressed stores
-
-Role
-
-Cold storage & traceability
-
-“This exact document version was used.”
-
-Strengths
-
-Cheap
-
-Immutable
-
-Required for audit & replay
-
-Supports versioning
-
-Tradeoffs
-
-Not searchable alone
-
-Requires indexes on top
-
-7. Reranking & Scoring Layer (Often Overlooked)
-
-Examples
-
-Cross-encoder models
-
-LLM scoring
-
-Rules engines
-
-Role
-
-Final relevance judgment
-
-“Which of these is actually best?”
-
-Strengths
-
-Massive relevance lift
-
-Reduces hallucinations
-
-Aligns results with user intent
-
-Tradeoffs
-
-Compute heavy
-
-Latency impact
-
-Needs careful caching
-
-Putting It Together: A Proven Enterprise Pattern
-                ┌──────────────┐
-                │  User Query  │
-                └──────┬───────┘
-                       │
-        ┌──────────────▼──────────────┐
-        │  Query Orchestration Layer  │
-        └──────┬─────────┬────────────┘
-               │         │
-        ┌──────▼───┐ ┌───▼────────┐
-        │  Vector  │ │  Lexical   │
-        │  Search  │ │  Search    │
-        └──────┬───┘ └───┬────────┘
-               │         │
-        ┌──────▼─────────▼────────┐
-        │   Hybrid Merge / Rerank  │
-        └──────────┬──────────────┘
-                   │
-        ┌──────────▼───────────┐
-        │   Knowledge Graph    │ (optional)
-        └──────────┬───────────┘
-                   │
-        ┌──────────▼───────────┐
-        │   LLM Answer / RAG   │
-        └─────────────────────┘
 
