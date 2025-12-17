@@ -253,7 +253,7 @@ Used for:
 
 ---
 
-## Putting It Together
+## Query Workflow
 
 ```
             ┌──────────────┐
